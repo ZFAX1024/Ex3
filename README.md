@@ -10,24 +10,158 @@
 ### 2.1 实验环境搭建
 配置 Python 开发环境并安装 OpenCV、NumPy、Matplotlib 等必要库。设置中文字体支持解决 Matplotlib 中文显示问题。准备测试图像数据（a.jpg 和 b.jpg）。
 
+![image](a.jpg)
+![image](b.jpg)
+
+```python
+import cv2
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib import font_manager
+
+# 设置中文字体支持
+plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'DejaVu Sans']
+plt.rcParams['axes.unicode_minus'] = False
+%matplotlib inline
+```
 ### 2.2 图像预处理
 读取图像文件并转换为灰度图像，对图像进行必要的预处理操作。
+```
+# 读取图像文件
+img_a = cv2.imread("a.jpg")
+img_b = cv2.imread("b.jpg")
 
+# 转换为灰度图像
+gray_a = cv2.cvtColor(img_a, cv2.COLOR_BGR2GRAY)
+gray_b = cv2.cvtColor(img_b, cv2.COLOR_BGR2GRAY)
+
+# 显示原始图像
+img_a_rgb = cv2.cvtColor(img_a, cv2.COLOR_BGR2RGB)
+img_b_rgb = cv2.cvtColor(img_b, cv2.COLOR_BGR2RGB)
+
+fig, axes = plt.subplots(1, 2, figsize=(15, 6))
+axes[0].imshow(img_a_rgb)
+axes[0].set_title("图像A")
+axes[0].axis('off')
+axes[1].imshow(img_b_rgb)
+axes[1].set_title("图像B")
+axes[1].axis('off')
+plt.tight_layout()
+plt.show()
+```
 ### 2.3 SIFT 特征提取
 初始化 SIFT 检测器，提取图像关键点和描述符，分析特征点的分布和数量特征。
+```
+sift = cv2.SIFT_create()
+kp_a, des_a = sift.detectAndCompute(gray_a, None)
+kp_b, des_b = sift.detectAndCompute(gray_b, None)
 
+print(f"图像A特征点数量: {len(kp_a)}")
+print(f"图像B特征点数量: {len(kp_b)}")
+```
 ### 2.4 特征匹配与优化
 使用 FLANN 匹配器进行特征匹配，应用 Lowe's 比率测试筛选优质匹配点，可视化特征匹配结果。
+```
+# 使用FLANN匹配器进行特征匹配
+FLANN_INDEX_KDTREE = 1
+index_params = dict(algorithm=FLANN_INDEX_KDTREE, trees=5)
+search_params = dict(checks=50)
+flann = cv2.FlannBasedMatcher(index_params, search_params)
+matches = flann.knnMatch(des_a, des_b, k=2)
 
+# 应用Lowe's比率测试筛选优质匹配点
+good_matches = []
+for m, n in matches:
+    if m.distance < 0.7 * n.distance:
+        good_matches.append(m)
+
+print(f"优质匹配点数量: {len(good_matches)}")
+
+# 绘制匹配的SIFT关键点
+matched_keypoints_img = cv2.drawMatches(
+    img_a, kp_a, img_b, kp_b, good_matches,
+    None, flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS
+)
+
+# 显示匹配结果
+plt.figure(figsize=(16, 8))
+plt.imshow(cv2.cvtColor(matched_keypoints_img, cv2.COLOR_BGR2RGB))
+plt.title("特征点匹配结果")
+plt.axis('off')
+plt.show()
+```
 ### 2.5 单应性矩阵估计
 使用 RANSAC 算法估计两幅图像间的透视变换关系，计算单应性矩阵 H 描述图像间的坐标映射关系。
+```
+# 提取匹配点的坐标
+src_pts = np.float32([kp_b[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2)
+dst_pts = np.float32([kp_a[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)
 
+# 使用RANSAC算法估计单应矩阵（透视变换矩阵）
+H, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
+print(f"单应矩阵:\n{H}")
+```
 ### 2.6 图像拼接与融合
 基于单应性矩阵进行透视变换，计算拼接后图像尺寸并进行图像融合，实现无缝的图像拼接效果。
+```
+# 获取输入图像尺寸
+h_a, w_a = img_a.shape[:2]
+h_b, w_b = img_b.shape[:2]
 
+# 计算图像变换后的四个角坐标
+pts = np.float32([[0, 0], [0, h_b], [w_b, h_b], [w_b, 0]]).reshape(-1, 1, 2)
+dst_corners = cv2.perspectiveTransform(pts, H)
+
+# 确定拼接后图像的最终尺寸（包含所有像素）
+all_corners = np.concatenate([dst_corners, np.float32([[0,0], [w_a,0], [w_a,h_a], [0,h_a]]).reshape(-1,1,2)], axis=0)
+[x_min, y_min] = np.int32(all_corners.min(axis=0).ravel() + 0.5)
+[x_max, y_max] = np.int32(all_corners.max(axis=0).ravel() + 0.5)
+
+print(f"拼接图像尺寸: {x_max - x_min} x {y_max - y_min}")
+
+# 创建平移矩阵，确保所有像素都在可视区域内
+translation_matrix = np.array([[1, 0, -x_min], [0, 1, -y_min], [0, 0, 1]], dtype=np.float32)
+
+# 对图像进行透视变换和平移
+fus_img = cv2.warpPerspective(
+    img_b,
+    translation_matrix @ H,  # 组合平移矩阵和单应矩阵
+    (x_max - x_min, y_max - y_min)  # 输出图像尺寸
+)
+
+# 将图像A复制到拼接结果的对应位置
+fus_img[-y_min:h_a - y_min, -x_min:w_a - x_min] = img_a
+```
 ### 2.7 结果可视化与分析
 展示原始图像、特征匹配结果和最终拼接效果，分析拼接质量并评估算法性能。
+```
+# 显示所有结果
+fig, axes = plt.subplots(2, 2, figsize=(16, 12))
 
+# 原始图像A
+axes[0, 0].imshow(img_a_rgb)
+axes[0, 0].set_title("图像A (原始)")
+axes[0, 0].axis('off')
+
+# 原始图像B
+axes[0, 1].imshow(img_b_rgb)
+axes[0, 1].set_title("图像B (原始)")
+axes[0, 1].axis('off')
+
+# 特征匹配
+axes[1, 0].imshow(cv2.cvtColor(matched_keypoints_img, cv2.COLOR_BGR2RGB))
+axes[1, 0].set_title("特征点匹配")
+axes[1, 0].axis('off')
+
+# 拼接结果
+fus_img_rgb = cv2.cvtColor(fus_img, cv2.COLOR_BGR2RGB)
+axes[1, 1].imshow(fus_img_rgb)
+axes[1, 1].set_title("拼接结果")
+axes[1, 1].axis('off')
+
+plt.tight_layout()
+plt.show()
+```
 ## 三、实验结果与分析
 ### 3.1 特征提取结果分析
 | 图像 | 特征点数量 | 特征分布特点 |
